@@ -22,12 +22,10 @@ const auto &GetLeft = [](const auto &Matrix, int Row, int Col) {
 };
 
 const auto &GetScoringInfo = [](const llvm::ScoringSystem &Scoring) {
-  const ScoreSystemType Gap = Scoring.getGapPenalty();
-  const ScoreSystemType Match = Scoring.getMatchProfit();
-  const bool AllowMismatch = Scoring.getAllowMismatch();
-  const ScoreSystemType Mismatch =
-      AllowMismatch ? Scoring.getMismatchPenalty()
-                    : std::numeric_limits<ScoreSystemType>::min();
+  auto [Gap, Match, Mismatch, AllowMismatch] = Scoring;
+
+  Mismatch =
+      AllowMismatch ? Mismatch : std::numeric_limits<ScoreSystemType>::min();
 
   return std::tuple{Gap, Match, AllowMismatch, Mismatch};
 };
@@ -148,30 +146,7 @@ private:
     ScoringSystem &Scoring = BaseType::getScoring();
     const auto [Gap, Match, AllowMismatch, Mismatch] = GetScoringInfo(Scoring);
 
-    int I = Scores.getRows(), J = Scores.getCols() - 1;
-
-    const auto &HandleDiagonal = [&PossibleMatches, &Seq1, &Seq2, &Scores,
-                                  &Data, AllowMismatch, Match,
-                                  Mismatch](int I, int J) {
-      bool IsValidMatch = PossibleMatches ? GetDiagonal(*PossibleMatches, I, J)
-                                          : Seq1[I - 1] == Seq2[J - 1];
-
-      // Update data and score
-      ScoreSystemType Score =
-          AllowMismatch
-              ? GetDiagonal(Scores, I, J) + (IsValidMatch ? Match : Mismatch)
-          : IsValidMatch ? (GetDiagonal(Scores, I, J) + Match)
-                         : Mismatch;
-
-      if (Scores(I, J) == Score) {
-        if (IsValidMatch || AllowMismatch) {
-          Data.emplace_front(Seq1[I - 1], Seq2[J - 1], IsValidMatch);
-        } else {
-          Data.emplace_front(Seq1[I - 1], Blank, false);
-          Data.emplace_front(Blank, Seq2[J - 1], false);
-        }
-      }
-    };
+    int Row = Scores.getRows() - 1, Column = Scores.getCols() - 1;
 
     const auto &IsDiagonal = [](auto Row, auto Column) -> bool {
       return Row > 0 && Column > 0;
@@ -184,19 +159,37 @@ private:
              Scores(Row, Column) == (Scores(Row, Column - 1) + Gap);
     };
 
-    while (I > 0 || J > 0) {
-      if (IsDiagonal(I, J)) {
-        HandleDiagonal(I, J);
-        I--;
-        J--;
+    while (Row > 0 || Column > 0) {
+      if (IsDiagonal(Row, Column)) {
+        bool IsValidMatch = PossibleMatches
+                                ? GetDiagonal(*PossibleMatches, Row, Column)
+                                : Seq1[Row - 1] == Seq2[Column - 1];
+
+        // Update data and score
+        ScoreSystemType Score =
+            AllowMismatch ? GetDiagonal(Scores, Row, Column) +
+                                (IsValidMatch ? Match : Mismatch)
+            : IsValidMatch ? (GetDiagonal(Scores, Row, Column) + Match)
+                           : Mismatch;
+
+        if (Scores(Row, Column) == Score) {
+          if (IsValidMatch || AllowMismatch) {
+            Data.emplace_front(Seq1[Row - 1], Seq2[Column - 1], IsValidMatch);
+          } else {
+            Data.emplace_front(Seq1[Row - 1], Blank, false);
+            Data.emplace_front(Blank, Seq2[Column - 1], false);
+          }
+        }
+        Row--;
+        Column--;
         continue;
       }
-      if (IsUp(I, J)) {
-        Data.emplace_front(Seq1[I - 1], Blank, false);
-        I--;
-      } else if (IsLeft(I, J)) {
-        Data.emplace_front(Blank, Seq2[J - 1], false);
-        J--;
+      if (IsUp(Row, Column)) {
+        Data.emplace_front(Seq1[Row - 1], Blank, false);
+        Row--;
+      } else if (IsLeft(Row, Column)) {
+        Data.emplace_front(Blank, Seq2[Column - 1], false);
+        Column--;
       }
     }
 
