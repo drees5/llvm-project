@@ -14,11 +14,11 @@ namespace {
 const auto &GetDiagonal = [](const auto &Matrix, int Row, int Col) {
   return Matrix(Row - 1, Col - 1);
 };
-const auto &GetUpper = [](const auto &Matrix, int Row, int Col) {
-  return Matrix(Row - 1, Col);
-};
 const auto &GetLeft = [](const auto &Matrix, int Row, int Col) {
   return Matrix(Row, Col - 1);
+};
+const auto &GetUpper = [](const auto &Matrix, int Row, int Col) {
+  return Matrix(Row - 1, Col);
 };
 
 const auto &GetScoringInfo = [](const llvm::ScoringSystem &Scoring) {
@@ -152,11 +152,12 @@ private:
       return Row > 0 && Column > 0;
     };
     const auto &IsUp = [&Scores, Gap](auto Row, auto Column) -> bool {
-      return Row > 0 && Scores(Row, Column) == (Scores(Row - 1, Column) + Gap);
+      return Row > 0 &&
+             Scores(Row, Column) == (GetUpper(Scores, Row, Column) + Gap);
     };
     const auto &IsLeft = [&Scores, Gap](auto Row, auto Column) -> bool {
       return Column > 0 &&
-             Scores(Row, Column) == (Scores(Row, Column - 1) + Gap);
+             Scores(Row, Column) == (GetLeft(Scores, Row, Column) + Gap);
     };
 
     while (Row > 0 || Column > 0) {
