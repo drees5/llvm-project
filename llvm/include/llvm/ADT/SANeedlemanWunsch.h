@@ -21,11 +21,6 @@ const auto &GetLeft = [](const auto &Matrix, int Row, int Col) {
   return Matrix(Row, Col - 1);
 };
 
-const auto &RowContainsMatch = [](const auto &Row) {
-  return std::any_of(std::begin(Row), std::end(Row),
-                     [](bool Matching) { return Matching; });
-};
-
 const auto &GetScoringInfo = [](const llvm::ScoringSystem &Scoring) {
   const ScoreSystemType Gap = Scoring.getGapPenalty();
   const ScoreSystemType Match = Scoring.getMatchProfit();
@@ -42,8 +37,8 @@ public:
   Matrix(size_t Rows, size_t Cols)
       : Ts{new T[Rows * Cols]}, Rows{Rows}, Cols{Cols} {};
 
-  T &operator()(int Row, int Col) { return Ts[Row + Cols * Col]; }
-  T operator()(int Row, int Col) const { return Ts[Row + Cols * Col]; }
+  T &operator()(int Row, int Col) { return Ts[Row * Cols + Col]; }
+  T operator()(int Row, int Col) const { return Ts[Row * Cols + Col]; }
 
   size_t getRows() const { return Rows; }
   size_t getCols() const { return Cols; }
