@@ -12,7 +12,7 @@ enum class Relation {
   DESCENTANT,
 };
 
-template <typename ContainerType, typename Ty> class DependencyInfo {
+template <typename ContainerType> class DependencyInfo {
   // Using small bit vectors might be inefficient
 
   llvm::SmallVector<llvm::SmallBitVector> Dep;
@@ -20,6 +20,8 @@ template <typename ContainerType, typename Ty> class DependencyInfo {
   size_t Size;
 
 public:
+  using value_type = ContainerType;
+
   DependencyInfo(const ContainerType &Seq) : Size{Seq.size()} {
 
 #ifdef ENABLE_DEBUG
@@ -27,28 +29,27 @@ public:
 #endif
 
     // Instruction pointer to index in the Dep arrays mapping
-    const llvm::SmallDenseMap<const llvm::Instruction *const, size_t> IMap =
-        [&Seq, this]() {
-          // We form triangular 2D arrays where row > column
-          // Columns represent producing instructions,
-          // Rows represent consuming instructions
-          // A set bit represents a dependency between the two instructions
-          llvm::SmallDenseMap<const llvm::Instruction *const, size_t> IMap;
-          for (size_t Idx = 0; Idx < Size; ++Idx) {
-            // emplace back an Idx-sized bit vector
-            Dep.emplace_back(Idx);
-            // Same
-            DataDep.emplace_back(Idx);
+    const llvm::SmallDenseMap<llvm::Instruction *, size_t> IMap = [&Seq,
+                                                                   this]() {
+      // We form triangular 2D arrays where row > column
+      // Columns represent producing instructions,
+      // Rows represent consuming instructions
+      // A set bit represents a dependency between the two instructions
+      llvm::SmallDenseMap<llvm::Instruction *, size_t> IMap;
+      for (size_t Idx = 0; Idx < Size; ++Idx) {
+        // emplace back an Idx-sized bit vector
+        Dep.emplace_back(Idx);
+        // Same
+        DataDep.emplace_back(Idx);
 
-            // Maintain a mapping from instruction pointer to index
-            if (llvm::Instruction *I =
-                    llvm::dyn_cast<llvm::Instruction>(Seq[Idx]);
-                I) {
-              IMap[I] = Idx;
-            }
-          }
-          return IMap;
-        }();
+        // Maintain a mapping from instruction pointer to index
+        if (llvm::Instruction *I = llvm::dyn_cast<llvm::Instruction>(Seq[Idx]);
+            I) {
+          IMap[I] = Idx;
+        }
+      }
+      return IMap;
+    }();
 
     const auto InstructionReadsOrWrites = [](llvm::Instruction *I) -> bool {
       if (!I)
@@ -60,7 +61,7 @@ public:
 
     const auto InstructionMayLeaveBasicBlock =
         [](llvm::Instruction *I) -> bool {
-      I->mayThrow() || !I->willReturn() || llvm::isa<llvm::CallBase>(I);
+      return I->mayThrow() || !I->willReturn() || llvm::isa<llvm::CallBase>(I);
     };
 
     const auto AddInstructionDependencies =
@@ -102,7 +103,7 @@ public:
         if (!UI || UI->getParent() != I->getParent())
           return;
 
-        AddInstructionDependencies(I, U, ProducingIdx);
+        AddInstructionDependencies(I, UI, ProducingIdx);
       }
 
       if (InstructionMayLeaveBasicBlock) {
@@ -144,7 +145,7 @@ public:
     for (size_t Idx = 1; Idx < Size; ++Idx)
       Dep[Idx].reset(0);
 
-    const int TerminatorIndex = Size - 1;
+    const size_t TerminatorIndex = Size - 1;
 
     // Connect all ancestors and descentants
     for (size_t Idx = 2; Idx < TerminatorIndex; ++Idx)
@@ -262,7 +263,7 @@ public:
   }
 
   // Get all the data dependencies (forward and backward) of Idx
-  llvm::SmallBitVector getConnections(size_t Idx) {
+  llvm::SmallBitVector getConnections(size_t Idx) const {
     llvm::SmallBitVector Conns(Size);
     for (size_t OtherIdx = 0; OtherIdx < Idx; ++OtherIdx) {
       Conns[OtherIdx] = DataDep[Idx][OtherIdx];
@@ -271,6 +272,20 @@ public:
       Conns[OtherIdx] = DataDep[OtherIdx][Idx];
     }
     return Conns;
+  }
+
+  // Returns the closest instruction that Idx depends on, Idx otherwise.
+  size_t getDependent(size_t Idx) const {
+    if (Idx == 0) {
+      return Idx;
+    }
+
+    for (size_t I = Idx - 1; I--;) {
+      if (DataDep[Idx][I]) {
+        return I;
+      }
+    }
+    return Idx;
   }
 
   Relation getRelation(size_t Idx, size_t Jdx) {
