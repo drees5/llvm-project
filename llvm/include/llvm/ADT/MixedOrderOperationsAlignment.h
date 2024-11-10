@@ -1,273 +1,474 @@
+#ifndef MIXED_ORDER_OPERATIONS_SEQUENCE_ALIGNER
+#define MIXED_ORDER_OPERATIONS_SEQUENCE_ALIGNER
+
+#include <algorithm>
+#include <cstddef>
+#include <functional>
+#include <iterator>
+#include <optional>
+#include <unordered_map>
+#include <utility>
+#include <vector>
 
 #include "llvm/ADT/SequenceAlignment.h"
-#include <functional>
+
+namespace {
+
+const auto &GetDiagonal = [](const auto &Matrix, int Row, int Col) {
+  return Matrix(Row - 1, Col - 1);
+};
+const auto &GetLeft = [](const auto &Matrix, int Row, int Col) {
+  return Matrix(Row, Col - 1);
+};
+const auto &GetUpper = [](const auto &Matrix, int Row, int Col) {
+  return Matrix(Row - 1, Col);
+};
+
+const auto &GetScoringInfo = [](const llvm::ScoringSystem &Scoring) {
+  auto [Gap, Match, Mismatch, AllowMismatch] = Scoring;
+
+  Mismatch =
+      AllowMismatch ? Mismatch : std::numeric_limits<ScoreSystemType>::min();
+
+  return std::tuple{Gap, Match, AllowMismatch, Mismatch};
+};
+
+template <typename T> class Matrix {
+public:
+  Matrix(size_t Rows, size_t Cols)
+      : Ts{new T[Rows * Cols]}, Rows{Rows}, Cols{Cols} {};
+
+  T &operator()(int Row, int Col) { return Ts[Row * Cols + Col]; }
+  T operator()(int Row, int Col) const { return Ts[Row * Cols + Col]; }
+
+  size_t getRows() const { return Rows; }
+  size_t getCols() const { return Cols; }
+
+private:
+  T *Ts;
+  size_t Rows;
+  size_t Cols;
+};
+
+struct MergedBlock {
+  size_t StartIndex;
+  size_t EndIndex;
+};
+
+enum class Sequence { Type1, Type2 };
+
+template <Sequence T> struct PreMergeIndexes {
+  std::vector<std::optional<int>> ToOriginalIndexes;
+  std::vector<int> OriginalToNewIndexes;
+};
+
+} // namespace
+
 namespace llvm {
 
-template <typename ContainerType,
-          typename Ty = typename ContainerType::value_type, Ty Blank = Ty(0),
-          typename MatchFnTy = std::function<bool(Ty, Ty)>>
-class NeedlemanWunschSA
-    : public SequenceAligner<ContainerType, Ty, Blank, MatchFnTy> {
+template <typename INSTRUCTION_DEPENDENCY_CALCULATOR,
+          typename CONTAINER_TYPE =
+              typename INSTRUCTION_DEPENDENCY_CALCULATOR::value_type,
+          typename TY = typename CONTAINER_TYPE::value_type, TY Blank = TY(0),
+          typename MATCH_FUNCTION = std::function<bool(TY, TY)>>
+class MixedOperationsSequenceAligner {
 private:
-  ScoreSystemType *Matrix;
-  size_t MatrixRows;
-  size_t MatrixCols;
-  bool *Matches;
-  size_t MatchesRows;
-  size_t MatchesCols;
+  ScoringSystem Scoring = getDefaultScoring();
+  MATCH_FUNCTION Match = nullptr;
 
-  const static unsigned END = 0;
-  const static unsigned DIAGONAL = 1;
-  const static unsigned UP = 2;
-  const static unsigned LEFT = 3;
+  using ScoreMatrix = Matrix<ScoreSystemType>;
+  using MatchMatrix = Matrix<bool>;
+  using AlignedSequenceData =
+      std::list<typename AlignedSequence<TY, Blank>::Entry>;
 
-  size_t MaxRow;
-  size_t MaxCol;
-
-  using BaseType = SequenceAligner<ContainerType, Ty, Blank, MatchFnTy>;
-
-  void cacheAllMatches(ContainerType &Seq1, ContainerType &Seq2) {
-    if (BaseType::getMatchOperation() == nullptr) {
-      Matches = nullptr;
-      return;
+  std::optional<MatchMatrix> cacheAllMatches(const CONTAINER_TYPE &Seq1,
+                                             const CONTAINER_TYPE &Seq2) {
+    if (!Match) {
+      return std::nullopt;
     }
-    const size_t SizeSeq1 = Seq1.size();
-    const size_t SizeSeq2 = Seq2.size();
 
-    MatchesRows = SizeSeq1;
-    MatchesCols = SizeSeq2;
-    Matches = new bool[SizeSeq1 * SizeSeq2];
-    for (unsigned I = 0; I < SizeSeq1; I++)
-      for (unsigned J = 0; J < SizeSeq2; J++)
-        Matches[I * SizeSeq2 + J] = BaseType::match(Seq1[I], Seq2[J]);
+    const auto Rows = std::size(Seq1), Cols = std::size(Seq2);
+
+    auto Table = MatchMatrix{Rows, Cols};
+
+    for (unsigned Row = 0; Row < Rows; Row++)
+      for (unsigned Col = 0; Col < Cols; Col++) {
+        bool IsMatch = Match(Seq1[Row], Seq2[Col]);
+        Table(Row, Col) = IsMatch;
+      }
+
+    return Table;
   }
 
-  void computeScoreMatrix(ContainerType &Seq1, ContainerType &Seq2) {
-    const size_t SizeSeq1 = Seq1.size();
-    const size_t SizeSeq2 = Seq2.size();
+  ScoreMatrix
+  computeScoreMatrix(const CONTAINER_TYPE &Seq1, const CONTAINER_TYPE &Seq2,
+                     const std::optional<MatchMatrix> &PossibleMatches) {
 
-    const size_t NumRows = SizeSeq1 + 1;
-    const size_t NumCols = SizeSeq2 + 1;
-    Matrix = new ScoreSystemType[NumRows * NumCols];
-    MatrixRows = NumRows;
-    MatrixCols = NumCols;
+    const auto &[Gap, Match, AllowMismatch, Mismatch] = GetScoringInfo(Scoring);
 
-    ScoringSystem &Scoring = BaseType::getScoring();
-    const ScoreSystemType Gap = Scoring.getGapPenalty();
-    const ScoreSystemType Match = Scoring.getMatchProfit();
-    const bool AllowMismatch = Scoring.getAllowMismatch();
-    const ScoreSystemType Mismatch =
-        AllowMismatch ? Scoring.getMismatchPenalty()
-                      : std::numeric_limits<ScoreSystemType>::min();
+    auto Matrix = ScoreMatrix{std::size(Seq1) + 1, std::size(Seq2) + 1};
 
-    for (unsigned I = 0; I < NumRows; I++)
-      Matrix[I * NumCols + 0] = I * Gap;
-    for (unsigned J = 0; J < NumCols; J++)
-      Matrix[0 * NumCols + J] = J * Gap;
+    // First element of each row
+    for (size_t Row = 0; Row < Matrix.getRows(); Row++)
+      Matrix(Row, 0) = Row * Gap;
+    // First row
+    for (size_t Col = 0; Col < Matrix.getCols(); Col++)
+      Matrix(0, Col) = Col * Gap;
 
-    ScoreSystemType MaxScore = std::numeric_limits<ScoreSystemType>::min();
-    if (Matches) {
-      if (AllowMismatch) {
-        for (unsigned I = 1; I < NumRows; I++) {
-          for (unsigned J = 1; J < NumCols; J++) {
-            ScoreSystemType Similarity =
-                Matches[(I - 1) * MatchesCols + J - 1] ? Match : Mismatch;
-            ScoreSystemType Diagonal =
-                Matrix[(I - 1) * NumCols + J - 1] + Similarity;
-            ScoreSystemType Upper = Matrix[(I - 1) * NumCols + J] + Gap;
-            ScoreSystemType Left = Matrix[I * NumCols + J - 1] + Gap;
-            ScoreSystemType Score = std::max(std::max(Diagonal, Upper), Left);
-            Matrix[I * NumCols + J] = Score;
-            if (Score >= MaxScore) {
-              MaxScore = Score;
-              MaxRow = I;
-              MaxCol = J;
-            }
-          }
-        }
-      } else {
-        for (unsigned I = 1; I < NumRows; I++) {
-          for (unsigned J = 1; J < NumCols; J++) {
-            ScoreSystemType Diagonal =
-                Matches[(I - 1) * MatchesCols + J - 1]
-                    ? (Matrix[(I - 1) * NumCols + J - 1] + Match)
-                    : Mismatch;
-            ScoreSystemType Upper = Matrix[(I - 1) * NumCols + J] + Gap;
-            ScoreSystemType Left = Matrix[I * NumCols + J - 1] + Gap;
-            ScoreSystemType Score = std::max(std::max(Diagonal, Upper), Left);
-            Matrix[I * NumCols + J] = Score;
-            if (Score >= MaxScore) {
-              MaxScore = Score;
-              MaxRow = I;
-              MaxCol = J;
-            }
-          }
-        }
+    const auto &IndexDiagonalMatches = [&PossibleMatches, &Seq1,
+                                        &Seq2](int Row, int Column) {
+      if (PossibleMatches) {
+        return GetDiagonal(*PossibleMatches, Row, Column);
       }
-    } else {
+
+      return Seq1[Row - 1] == Seq2[Column - 1];
+    };
+
+    const auto &GetDiagonalScore = [AllowMismatch, Match,
+                                    Mismatch](auto DiagonalMatches,
+                                              auto DiagonalScore) {
       if (AllowMismatch) {
-        for (unsigned I = 1; I < NumRows; I++) {
-          for (unsigned J = 1; J < NumCols; J++) {
-            ScoreSystemType Similarity =
-                (Seq1[I - 1] == Seq2[J - 1]) ? Match : Mismatch;
-            ScoreSystemType Diagonal =
-                Matrix[(I - 1) * NumCols + J - 1] + Similarity;
-            ScoreSystemType Upper = Matrix[(I - 1) * NumCols + J] + Gap;
-            ScoreSystemType Left = Matrix[I * NumCols + J - 1] + Gap;
-            ScoreSystemType Score = std::max(std::max(Diagonal, Upper), Left);
-            Matrix[I * NumCols + J] = Score;
-            if (Score >= MaxScore) {
-              MaxScore = Score;
-              MaxRow = I;
-              MaxCol = J;
-            }
-          }
-        }
-      } else {
-        for (unsigned I = 1; I < NumRows; I++) {
-          for (unsigned J = 1; J < NumCols; J++) {
-            ScoreSystemType Diagonal =
-                (Seq1[I - 1] == Seq2[J - 1])
-                    ? (Matrix[(I - 1) * NumCols + J - 1] + Match)
-                    : Mismatch;
-            ScoreSystemType Upper = Matrix[(I - 1) * NumCols + J] + Gap;
-            ScoreSystemType Left = Matrix[I * NumCols + J - 1] + Gap;
-            ScoreSystemType Score = std::max(std::max(Diagonal, Upper), Left);
-            Matrix[I * NumCols + J] = Score;
-            if (Score >= MaxScore) {
-              MaxScore = Score;
-              MaxRow = I;
-              MaxCol = J;
-            }
-          }
-        }
+        ScoreSystemType Similarity = DiagonalMatches ? Match : Mismatch;
+
+        return DiagonalScore + Similarity;
       }
+
+      return DiagonalMatches ? DiagonalScore + Match : Mismatch;
+    };
+
+    for (unsigned Row = 1; Row < Matrix.getRows(); Row++) {
+      for (unsigned Col = 1; Col < Matrix.getCols(); Col++) {
+        ScoreSystemType Diagonal = GetDiagonalScore(
+            IndexDiagonalMatches(Row, Col), GetDiagonal(Matrix, Row, Col));
+        ScoreSystemType Left = GetLeft(Matrix, Row, Col) + Gap;
+        ScoreSystemType Upper = GetUpper(Matrix, Row, Col) + Gap;
+
+        ScoreSystemType Score = std::max({Diagonal, Upper, Left});
+
+        Matrix(Row, Col) = Score;
+      }
+    }
+
+    return Matrix;
+  }
+
+  std::vector<MergedBlock> static findSuccessfullyMergedBlocks(
+      const AlignedSequenceData &InstructionPairs) {
+    std::vector<MergedBlock> PairIndexes;
+
+    bool CurrentlyInMergedBlock = false;
+    size_t CurrentMergedBlockIndex = 0;
+
+    size_t I = 0;
+
+    for (const auto &Entry : InstructionPairs) {
+      if (CurrentlyInMergedBlock) {
+        // Currently in merged block
+        if (Entry.match()) {
+          I++;
+          continue;
+        }
+        PairIndexes.push_back({CurrentMergedBlockIndex, I});
+        CurrentlyInMergedBlock = false;
+      } else if (Entry.match()) {
+        // Starting a new block
+        CurrentMergedBlockIndex = I;
+        CurrentlyInMergedBlock = true;
+      }
+
+      I++;
+    }
+
+    // This means we finished with a merged block
+    if (CurrentlyInMergedBlock) {
+      PairIndexes.push_back({CurrentMergedBlockIndex, I});
+    }
+
+    return PairIndexes;
+  }
+
+  using BothPreMergeIndexes = std::pair<PreMergeIndexes<Sequence::Type1>,
+                                        PreMergeIndexes<Sequence::Type2>>;
+
+  BothPreMergeIndexes static calculatePreMergeIndexes(
+      const AlignedSequenceData &InstructionPairs) {
+    PreMergeIndexes<Sequence::Type1> Sequence1;
+    PreMergeIndexes<Sequence::Type2> Sequence2;
+
+    size_t Seq1Index = 0, Seq2Index = 0, AlignedSeqIndex = 0;
+
+    for (const auto &Entry : InstructionPairs) {
+      if (Entry.empty()) {
+      } else if (!Entry.hasBlank()) {
+        Sequence1.ToOriginalIndexes.push_back(Seq1Index);
+        Sequence2.ToOriginalIndexes.push_back(Seq2Index);
+
+        Sequence1.OriginalToNewIndexes.push_back(AlignedSeqIndex);
+        Sequence2.OriginalToNewIndexes.push_back(AlignedSeqIndex);
+
+        Seq1Index++;
+        Seq2Index++;
+      } else if (Entry.get(0) != Blank) {
+        Sequence1.ToOriginalIndexes.push_back(Seq1Index);
+        Sequence2.ToOriginalIndexes.push_back(std::nullopt);
+
+        Sequence1.OriginalToNewIndexes.push_back(AlignedSeqIndex);
+
+        Seq1Index++;
+      } else {
+        Sequence2.ToOriginalIndexes.push_back(Seq2Index);
+        Sequence1.ToOriginalIndexes.push_back(std::nullopt);
+
+        Sequence2.OriginalToNewIndexes.push_back(AlignedSeqIndex);
+
+        Seq2Index++;
+      }
+      AlignedSeqIndex++;
+    }
+
+    return {Sequence1, Sequence2};
+  }
+
+  static BothPreMergeIndexes
+  updateIndexesAfterInstructionMove(BothPreMergeIndexes OldIndexes,
+                                    size_t OldIndex, size_t NewIndex) {
+    auto [Seq1Indexes, Seq2Indexes] = std::move(OldIndexes);
+
+    const auto &UpdateIndexes = [OldIndex, NewIndex](auto Indexes) {
+      auto OriginalIndex = Indexes.ToOriginalIndexes[OldIndex];
+      auto NewIndexInOriginalIndex = Indexes.ToOriginalIndexes[NewIndex];
+
+      // Shouldn't happen
+      if (!OriginalIndex || !NewIndexInOriginalIndex) {
+        return Indexes;
+      }
+
+      auto It = std::begin(Indexes.ToOriginalIndexes);
+      std::advance(It, OldIndex + 1);
+      auto ReverseIt = std::make_reverse_iterator(It);
+
+      auto NewIt = std::begin(Indexes.ToOriginalIndexes);
+      std::advance(NewIt, NewIndex);
+      auto ReverseNewIt = std::make_reverse_iterator(NewIt);
+
+      // This places our old instrucion at the new position, and shifts all
+      // instructions between new-old to the right. Works under the assumption
+      // that NewIndex < OldIndex
+      std::rotate(ReverseIt, ReverseIt + 1, ReverseNewIt);
+
+      // We need to increment all indexes after the new one as we've inserted a
+      // new instruciton
+      for (auto I = *OriginalIndex; I < *NewIndexInOriginalIndex; I++) {
+        Indexes.OriginalToNewIndexes[I]++;
+      }
+
+      Indexes.OriginalToNewIndexes[*OriginalIndex] = NewIndex;
+
+      return Indexes;
+    };
+
+    return {UpdateIndexes(std::move(Seq1Indexes)),
+            UpdateIndexes(std::move(Seq2Indexes))};
+  }
+
+  // Returns the updated previous merged block and indexes, as we may have moved
+  // things around
+  static std::pair<MergedBlock, BothPreMergeIndexes>
+  moveInstructionsToAboveMergedBlock(
+      AlignedSequenceData &InstructionPairs, const MergedBlock &TargetBlock,
+      MergedBlock PreviousBlock, BothPreMergeIndexes PreMergeIndexes,
+      INSTRUCTION_DEPENDENCY_CALCULATOR &BB1InstructionDependenies,
+      INSTRUCTION_DEPENDENCY_CALCULATOR &BB2InstructionDependenies) {
+
+    const auto &IsValidMove = [&PreMergeIndexes, &BB1InstructionDependenies,
+                               &BB2InstructionDependenies,
+                               &PreviousBlock](int TargetIndex) {
+      const auto &OriginaIndex1 =
+          PreMergeIndexes.first.ToOriginalIndexes[TargetIndex];
+      const auto &OriginaIndex2 =
+          PreMergeIndexes.second.ToOriginalIndexes[TargetIndex];
+
+      // We can only move InstructionPairs from matched blocks
+      if (!(OriginaIndex1 && OriginaIndex2)) {
+        return false;
+      }
+
+      const auto &Instruction1ClosestDependency =
+          BB1InstructionDependenies.getDependent(*OriginaIndex1);
+
+      const auto &Instruction2ClosestDependency =
+          BB2InstructionDependenies.getDependent(*OriginaIndex2);
+
+      // We don't mind about producers of data for minimising cross-block
+      // instruction data flow, we only need to move consumers.
+      if (Instruction1ClosestDependency == OriginaIndex1 &&
+          Instruction2ClosestDependency == OriginaIndex2) {
+        return false;
+      }
+
+      const auto &NewDependencyIndex1 =
+          PreMergeIndexes.first
+              .OriginalToNewIndexes[Instruction1ClosestDependency];
+      const auto &NewDependencyIndex2 =
+          PreMergeIndexes.second
+              .OriginalToNewIndexes[Instruction2ClosestDependency];
+
+      // We can move our merged instruciton iff we don't depend on anything
+      // after our previous merged block.
+      return NewDependencyIndex1 <= PreviousBlock.EndIndex &&
+             NewDependencyIndex2 <= PreviousBlock.EndIndex;
+    };
+
+    // We don't care where in the previous basic block we've moved to, only that
+    // it's now in the previous one. This is because the later compilation steps
+    // can re-order the instructions within one basic block.
+    const auto &MoveToPreviousBasicBlock =
+        [&PreviousBlock, &InstructionPairs](
+            int TargetIndex, BothPreMergeIndexes PreMergeIndexes) {
+          auto NewIt = std::begin(InstructionPairs);
+          std::advance(NewIt, PreviousBlock.EndIndex);
+
+          auto OldIt = std::begin(InstructionPairs);
+          std::advance(OldIt, TargetIndex);
+
+          InstructionPairs.splice(NewIt, InstructionPairs, OldIt);
+          return updateIndexesAfterInstructionMove(
+              std::move(PreMergeIndexes), TargetIndex, PreviousBlock.EndIndex);
+        };
+
+    for (auto I = TargetBlock.StartIndex; I < TargetBlock.EndIndex; I++) {
+      if (IsValidMove(I)) {
+        // Update indexes and previous block end index
+        PreMergeIndexes =
+            MoveToPreviousBasicBlock(I, std::move(PreMergeIndexes));
+        PreviousBlock.EndIndex++;
+      }
+    }
+
+    return {std::move(PreviousBlock), std::move(PreMergeIndexes)};
+  }
+
+  void reorderMergedInstructionPairs(
+      AlignedSequenceData &InstructionPairs,
+      INSTRUCTION_DEPENDENCY_CALCULATOR BB1InstructionDependenies,
+      INSTRUCTION_DEPENDENCY_CALCULATOR BB2InstructionDependenies) {
+    auto MergedBlockIndexes = findSuccessfullyMergedBlocks(InstructionPairs);
+
+    auto MergeIndexes = calculatePreMergeIndexes(InstructionPairs);
+
+    for (auto I = std::rbegin(MergedBlockIndexes),
+              // We use E as std::rend as we want to stop when we get to the
+              // first block, as there's no previous one
+         E = std::rend(MergedBlockIndexes) - 1;
+         I != E; I++) {
+      auto NextI = I;
+      std::advance(NextI, 1);
+
+      // We need to update the prevous basic block, as we may have added
+      // additional instructions to it.
+      auto [UpdatedPreviousBlock, UpdatedIndexes] =
+          moveInstructionsToAboveMergedBlock(
+              InstructionPairs, *I, *NextI, MergeIndexes,
+              BB1InstructionDependenies, BB2InstructionDependenies);
+
+      *NextI = std::move(UpdatedPreviousBlock);
+      MergeIndexes = std::move(UpdatedIndexes);
     }
   }
 
-  void buildResult(ContainerType &Seq1, ContainerType &Seq2,
-                   AlignedSequence<Ty, Blank> &Result) {
+  AlignedSequence<TY, Blank>
+  buildResult(const CONTAINER_TYPE &Seq1, const CONTAINER_TYPE &Seq2,
+              const std::optional<MatchMatrix> &PossibleMatches,
+              const ScoreMatrix &Scores) {
+    AlignedSequence<TY, Blank> Result{};
     auto &Data = Result.Data;
 
-    ScoringSystem &Scoring = BaseType::getScoring();
-    const ScoreSystemType Gap = Scoring.getGapPenalty();
-    const ScoreSystemType Match = Scoring.getMatchProfit();
-    const bool AllowMismatch = Scoring.getAllowMismatch();
-    const ScoreSystemType Mismatch =
-        AllowMismatch ? Scoring.getMismatchPenalty()
-                      : std::numeric_limits<ScoreSystemType>::min();
+    const auto [Gap, Match, AllowMismatch, Mismatch] = GetScoringInfo(Scoring);
 
-    int i = MatrixRows - 1, J = MatrixCols - 1;
+    int Row = Scores.getRows() - 1, Column = Scores.getCols() - 1;
 
-    size_t LongestMatch = 0;
-    size_t CurrentMatch = 0;
+    const auto &IsDiagonal = [](auto Row, auto Column) -> bool {
+      return Row > 0 && Column > 0;
+    };
+    const auto &IsUp = [&Scores, Gap](auto Row, auto Column) -> bool {
+      return Row > 0 &&
+             Scores(Row, Column) == (GetUpper(Scores, Row, Column) + Gap);
+    };
+    const auto &IsLeft = [&Scores, Gap](auto Row, auto Column) -> bool {
+      return Column > 0 &&
+             Scores(Row, Column) == (GetLeft(Scores, Row, Column) + Gap);
+    };
 
-    while (i > 0 || J > 0) {
-      if (i > 0 && J > 0) {
-        // Diagonal
+    while (Row > 0 || Column > 0) {
+      if (IsDiagonal(Row, Column)) {
+        bool IsValidMatch = PossibleMatches
+                                ? GetDiagonal(*PossibleMatches, Row, Column)
+                                : Seq1[Row - 1] == Seq2[Column - 1];
 
-        bool IsValidMatch = false;
+        ScoreSystemType Score =
+            AllowMismatch ? GetDiagonal(Scores, Row, Column) +
+                                (IsValidMatch ? Match : Mismatch)
+            : IsValidMatch ? (GetDiagonal(Scores, Row, Column) + Match)
+                           : Mismatch;
 
-        ScoreSystemType Score = std::numeric_limits<ScoreSystemType>::min();
-        if (Matches) {
-          IsValidMatch = Matches[(i - 1) * MatchesCols + J - 1];
-        } else {
-          IsValidMatch = (Seq1[i - 1] == Seq2[J - 1]);
-        }
-
-        if (!IsValidMatch) {
-          if (CurrentMatch > LongestMatch)
-            LongestMatch = CurrentMatch;
-          CurrentMatch = 0;
-        } else
-          CurrentMatch += 1;
-
-        if (AllowMismatch) {
-          Score = Matrix[(i - 1) * MatrixCols + J - 1] +
-                  (IsValidMatch ? Match : Mismatch);
-        } else {
-          Score = IsValidMatch ? (Matrix[(i - 1) * MatrixCols + J - 1] + Match)
-                               : Mismatch;
-        }
-
-        if (Matrix[i * MatrixCols + J] == Score) {
+        if (Scores(Row, Column) == Score) {
           if (IsValidMatch || AllowMismatch) {
-            Data.push_front(typename BaseType::EntryType(
-                Seq1[i - 1], Seq2[J - 1], IsValidMatch));
+            Data.emplace_front(Seq1[Row - 1], Seq2[Column - 1], IsValidMatch);
           } else {
-            Data.push_front(
-                typename BaseType::EntryType(Seq1[i - 1], Blank, false));
-            Data.push_front(
-                typename BaseType::EntryType(Blank, Seq2[J - 1], false));
+            Data.emplace_front(Seq1[Row - 1], Blank, false);
+            Data.emplace_front(Blank, Seq2[Column - 1], false);
           }
-
-          i--;
-          J--;
+          Row--;
+          Column--;
           continue;
         }
       }
-      if (i > 0 && Matrix[i * MatrixCols + J] ==
-                       (Matrix[(i - 1) * MatrixCols + J] + Gap)) {
-        // Up
-        Data.push_front(
-            typename BaseType::EntryType(Seq1[i - 1], Blank, false));
-        i--;
-      } else if (J > 0 && Matrix[i * MatrixCols + J] ==
-                              (Matrix[i * MatrixCols + (J - 1)] + Gap)) {
-        // Left
-        Data.push_front(
-            typename BaseType::EntryType(Blank, Seq2[J - 1], false));
-        J--;
+      if (IsUp(Row, Column)) {
+        Data.emplace_front(Seq1[Row - 1], Blank, false);
+        Row--;
+      } else if (IsLeft(Row, Column)) {
+        Data.emplace_front(Blank, Seq2[Column - 1], false);
+        Column--;
       }
     }
 
-    if (CurrentMatch > LongestMatch)
-      LongestMatch = CurrentMatch;
-  }
-
-  void clearAll() {
-    if (Matrix)
-      delete[] Matrix;
-    if (Matches)
-      delete[] Matches;
-    Matrix = nullptr;
-    Matches = nullptr;
+    return Result;
   }
 
 public:
-  static ScoringSystem getDefaultScoring() { return ScoringSystem(-1, 2, -1); }
+  static ScoringSystem getDefaultScoring() { return {-1, 2, -1}; }
 
-  NeedlemanWunschSA()
-      : BaseType(getDefaultScoring(), nullptr), Matrix(nullptr),
-        Matches(nullptr) {}
+  MixedOperationsSequenceAligner() {}
 
-  NeedlemanWunschSA(ScoringSystem Scoring, MatchFnTy Match = nullptr)
-      : BaseType(Scoring, Match), Matrix(nullptr), Matches(nullptr) {}
+  MixedOperationsSequenceAligner(ScoringSystem Scoring,
+                                 MATCH_FUNCTION Match = nullptr)
+      : Scoring{Scoring}, Match{Match} {}
 
-  ~NeedlemanWunschSA() { clearAll(); }
+  AlignedSequence<TY, Blank> getAlignment(const CONTAINER_TYPE &Seq1,
+                                          const CONTAINER_TYPE &Seq2) {
+    const auto &PossibleMatches = cacheAllMatches(Seq1, Seq2);
 
-  virtual size_t getMemoryRequirement(ContainerType &Seq1,
-                                      ContainerType &Seq2) override {
-    const size_t SizeSeq1 = Seq1.size();
-    const size_t SizeSeq2 = Seq2.size();
-    size_t MemorySize = 0;
+    const auto &Scores = computeScoreMatrix(Seq1, Seq2, PossibleMatches);
 
-    MemorySize += sizeof(ScoreSystemType) * (SizeSeq1 + 1) * (SizeSeq2 + 1);
+    auto PreReorderResult = buildResult(Seq1, Seq2, PossibleMatches, Scores);
 
-    if (BaseType::getMatchOperation() != nullptr)
-      MemorySize += SizeSeq1 * SizeSeq2 * sizeof(bool);
+    // No need to figure out dependencies if we haven't merged anything
+    if (PreReorderResult.size() == 0) {
+      return PreReorderResult;
+    }
 
-    return MemorySize;
-  }
+    const auto &BB1InstructionDependenies =
+        INSTRUCTION_DEPENDENCY_CALCULATOR{Seq1};
+    const auto &BB2InstructionDependenies =
+        INSTRUCTION_DEPENDENCY_CALCULATOR{Seq2};
 
-  virtual AlignedSequence<Ty, Blank>
-  getAlignment(ContainerType &Seq1, ContainerType &Seq2) override {
-    AlignedSequence<Ty, Blank> Result;
-    cacheAllMatches(Seq1, Seq2);
-    computeScoreMatrix(Seq1, Seq2);
-    buildResult(Seq1, Seq2, Result);
-    clearAll();
-    return Result;
+    reorderMergedInstructionPairs(PreReorderResult.Data,
+                                  BB1InstructionDependenies,
+                                  BB2InstructionDependenies);
+
+    return PreReorderResult;
   }
 };
+
+#endif
 } // namespace llvm

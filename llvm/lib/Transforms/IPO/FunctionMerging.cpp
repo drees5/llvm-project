@@ -88,8 +88,8 @@
 // #include "llvm/ADT/PostOrderIterator.h"
 #include "llvm/ADT/BreadthFirstIterator.h"
 #include "llvm/ADT/DependencyInfo.h"
+#include "llvm/ADT/MixedOrderOperationsAlignment.h"
 #include "llvm/ADT/PostOrderIterator.h"
-#include "llvm/ADT/SANeedlemanWunsch.h"
 #include "llvm/ADT/SANeedlemanWunsch__deprecated.h"
 #include "llvm/ADT/SmallSet.h"
 #include "llvm/ADT/SmallVector.h"
@@ -2557,8 +2557,8 @@ FunctionMerger::merge(Function *F1, Function *F2, std::string Name,
 
   AlignedCode AlignedSeq;
 
-  NeedlemanWunschSA<SmallVectorImpl<Value *>> SA{ScoringSystem(-1, 2),
-                                                 FunctionMerger::match};
+  MixedOperationsSequenceAligner<DependencyInfo<SmallVectorImpl<Value *>>> SA{
+      ScoringSystem(-1, 2), FunctionMerger::match};
 
   NeedlemanWunchSA__deprecated<SmallVectorImpl<Value *>> SA__deprecated{
       ScoringSystem(-1, 2), FunctionMerger::match};
@@ -2667,19 +2667,9 @@ FunctionMerger::merge(Function *F1, Function *F2, std::string Name,
           SmallVector<Value *, 8> BB2Vec;
           vectorizeBB(BB2Vec, BB2);
 
-          AlignedBlocks = SA.getAlignment(BB1Vec, BB2Vec);
+          AlignedBlocks = impl::makeMergedFunctionAndReorderInstructions<
+              DependencyInfo<decltype(BB1Vec)>>(SA, BB1Vec, BB2Vec);
 
-          if (Verbose) {
-            auto MemReq = SA.getMemoryRequirement(BB1Vec, BB2Vec);
-            errs() << "MStats: " << BB1Vec.size() << " , " << BB2Vec.size()
-                   << " , " << MemReq << "\n";
-
-            if (MemReq > MaxMem) {
-              MaxMem = MemReq;
-              B1Max = BB1Vec.size();
-              B2Max = BB2Vec.size();
-            }
-          }
         } else if (EnableHyFMNW) {
           SmallVector<Value *, 8> BB1Vec;
           vectorizeBB(BB1Vec, BB1);
@@ -2754,7 +2744,7 @@ FunctionMerger::merge(Function *F1, Function *F2, std::string Name,
     TimeLin.stopTimer();
 #endif
 
-    auto MemReq = SA.getMemoryRequirement(F1Vec, F2Vec);
+    auto MemReq = SA__deprecated.getMemoryRequirement(F1Vec, F2Vec);
     auto MemAvailable = getTotalSystemMemory();
     errs() << "MStats: " << F1Vec.size() << " , " << F2Vec.size() << " , "
            << MemReq << "\n";
