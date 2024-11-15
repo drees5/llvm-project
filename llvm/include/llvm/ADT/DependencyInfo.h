@@ -274,21 +274,21 @@ public:
     return Conns;
   }
 
-  // Returns the closest instruction that Idx depends on, Idx otherwise.
-  size_t getDependent(size_t Idx) const {
+  // Returns the closest instruction that Idx depends on if any
+  std::optional<size_t> getDependent(size_t Idx) const {
     if (Idx == 0) {
-      return Idx;
+      return std::nullopt;
     }
 
     for (size_t I = Idx - 1; I--;) {
-      if (DataDep[Idx][I]) {
+      if (getRelation(I, Idx) == Relation::DESCENTANT) {
         return I;
       }
     }
-    return Idx;
+    return std::nullopt;
   }
 
-  Relation getRelation(size_t Idx, size_t Jdx) {
+  Relation getRelation(size_t Idx, size_t Jdx) const {
     if (Idx < Jdx && Dep[Jdx][Idx])
       return Relation::ANCESTOR;
     if (Idx > Jdx && Dep[Idx][Jdx])

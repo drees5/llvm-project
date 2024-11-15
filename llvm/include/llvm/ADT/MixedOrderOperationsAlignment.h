@@ -283,9 +283,9 @@ private:
     const auto &IsValidMove = [&PreMergeIndexes, &BB1InstructionDependenies,
                                &BB2InstructionDependenies,
                                &PreviousBlock](int TargetIndex) {
-      const auto &OriginaIndex1 =
+      const auto OriginaIndex1 =
           PreMergeIndexes.first.ToOriginalIndexes[TargetIndex];
-      const auto &OriginaIndex2 =
+      const auto OriginaIndex2 =
           PreMergeIndexes.second.ToOriginalIndexes[TargetIndex];
 
       // We can only move InstructionPairs from matched blocks
@@ -293,25 +293,24 @@ private:
         return false;
       }
 
-      const auto &Instruction1ClosestDependency =
+      const auto Instruction1ClosestDependency =
           BB1InstructionDependenies.getDependent(*OriginaIndex1);
 
-      const auto &Instruction2ClosestDependency =
+      const auto Instruction2ClosestDependency =
           BB2InstructionDependenies.getDependent(*OriginaIndex2);
 
       // We don't mind about producers of data for minimising cross-block
       // instruction data flow, we only need to move consumers.
-      if (Instruction1ClosestDependency == OriginaIndex1 &&
-          Instruction2ClosestDependency == OriginaIndex2) {
+      if (!Instruction1ClosestDependency || !Instruction2ClosestDependency) {
         return false;
       }
 
-      const auto &NewDependencyIndex1 =
+      const size_t NewDependencyIndex1 =
           PreMergeIndexes.first
-              .OriginalToNewIndexes[Instruction1ClosestDependency];
-      const auto &NewDependencyIndex2 =
+              .OriginalToNewIndexes[*Instruction1ClosestDependency];
+      const size_t NewDependencyIndex2 =
           PreMergeIndexes.second
-              .OriginalToNewIndexes[Instruction2ClosestDependency];
+              .OriginalToNewIndexes[*Instruction2ClosestDependency];
 
       // We can move our merged instruciton iff we don't depend on anything
       // after our previous merged block.
