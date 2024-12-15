@@ -194,6 +194,11 @@ static cl::opt<bool>
     EnableHyFMNW("func-merging-hyfm-nw", cl::init(false), cl::Hidden,
                  cl::desc("Enable HyFM with the Needleman-Wunsch alignment"));
 
+static cl::opt<bool> EnableHyFMNWReordering(
+    "func-merging-hyfm-nw-reordering", cl::init(false), cl::Hidden,
+    cl::desc("Enable HyFM with the Needleman-Wunsch alignment, allowing "
+             "instruction reordering"));
+
 static cl::opt<bool> EnableSALSSACoalescing(
     "func-merging-coalescing", cl::init(true), cl::Hidden,
     cl::desc("Enable phi-node coalescing during SSA reconstruction"));
@@ -2653,14 +2658,12 @@ FunctionMerger::merge(Function *F1, Function *F2, std::string Name,
       TimeAlignRank.stopTimer();
 #endif
 
-      constexpr auto EnableMyThing = true;
-
       bool MergedBlock = false;
       if (BestDist < std::numeric_limits<float>::max()) {
         BasicBlock *BB1 = BestIt->BB;
         AlignedCode AlignedBlocks;
 
-        if (EnableMyThing) {
+        if (EnableHyFMNWReordering) {
           SmallVector<Value *, 8> BB1Vec;
           vectorizeBB(BB1Vec, BB1);
 
