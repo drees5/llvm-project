@@ -87,7 +87,7 @@
 
 // #include "llvm/ADT/PostOrderIterator.h"
 #include "llvm/ADT/BreadthFirstIterator.h"
-#include "llvm/ADT/DependencyInfo.h"
+#include "llvm/ADT/DependencyInfo__deprecated.h"
 #include "llvm/ADT/MixedOrderOperationsAlignment.h"
 #include "llvm/ADT/PostOrderIterator.h"
 #include "llvm/ADT/SANeedlemanWunsch__deprecated.h"
@@ -137,7 +137,7 @@
 
 #define DEBUG_TYPE "func-merging"
 
-// #define ENABLE_DEBUG_CODE
+#define ENABLE_DEBUG_CODE
 
 // #define SKIP_MERGING
 
@@ -166,8 +166,8 @@ static cl::opt<bool>
 static cl::opt<bool> Debug("func-merging-debug", cl::init(true), cl::Hidden,
                            cl::desc("Outputs debug information"));
 
-static cl::opt<bool> Verbose("func-merging-verbose", cl::init(false),
-                             cl::Hidden, cl::desc("Outputs debug information"));
+static cl::opt<bool> Verbose("func-merging-verbose", cl::init(true), cl::Hidden,
+                             cl::desc("Outputs debug information"));
 
 static cl::opt<bool>
     IdenticalType("func-merging-identic-type", cl::init(true), cl::Hidden,
@@ -195,7 +195,7 @@ static cl::opt<bool>
                  cl::desc("Enable HyFM with the Needleman-Wunsch alignment"));
 
 static cl::opt<bool> EnableHyFMNWReordering(
-    "func-merging-hyfm-nw-reordering", cl::init(false), cl::Hidden,
+    "func-merging-hyfm-nwsa", cl::init(false), cl::Hidden,
     cl::desc("Enable HyFM with the Needleman-Wunsch alignment, allowing "
              "instruction reordering"));
 
@@ -2560,15 +2560,17 @@ FunctionMerger::merge(Function *F1, Function *F2, std::string Name,
   time_align_start = std::chrono::steady_clock::now();
 #endif
 
+  errs() << "EnableHyFMNW = " << EnableHyFMNW << "\n";
+  errs() << "EnableHyFMPA = " << EnableHyFMPA << "\n";
+  errs() << "EnableHyFMNWReordering = " << EnableHyFMNWReordering << "\n";
+
   AlignedCode AlignedSeq;
 
-  MixedOperationsSequenceAligner<DependencyInfo<SmallVectorImpl<Value *>>> SA{
+  NeedlemanWunchSA__deprecated<SmallVectorImpl<Value *>> SA{
       ScoringSystem(-1, 2), FunctionMerger::match};
 
-  NeedlemanWunchSA__deprecated<SmallVectorImpl<Value *>> SA__deprecated{
-      ScoringSystem(-1, 2), FunctionMerger::match};
-
-  if (EnableHyFMNW || EnableHyFMPA) { // Processing individual pairs of blocks
+  if (EnableHyFMNW || EnableHyFMPA ||
+      EnableHyFMNWReordering) { // Processing individual pairs of blocks
 
     int B1Max{0}, B2Max{0};
     size_t MaxMem{0};
@@ -2607,7 +2609,7 @@ FunctionMerger::merge(Function *F1, Function *F2, std::string Name,
       auto ItSetDecr = std::reverse_iterator(ItSetIncr);
       std::vector<decltype(ItSetIncr)> ItSets;
 
-      if (EnableHyFMNW) {
+      if (EnableHyFMNW || EnableHyFMNWReordering) {
         while (ItSetDecr != Blocks.rend() && ItSetIncr != Blocks.end()) {
           if (BD2.Size - ItSetDecr->first < ItSetIncr->first - BD2.Size) {
             ItSets.push_back(std::prev(ItSetDecr.base()));
@@ -2664,14 +2666,19 @@ FunctionMerger::merge(Function *F1, Function *F2, std::string Name,
         AlignedCode AlignedBlocks;
 
         if (EnableHyFMNWReordering) {
+          errs() << "Doing func merging with reordering\n";
+
           SmallVector<Value *, 8> BB1Vec;
           vectorizeBB(BB1Vec, BB1);
 
           SmallVector<Value *, 8> BB2Vec;
           vectorizeBB(BB2Vec, BB2);
 
-          AlignedBlocks = impl::makeMergedFunctionAndReorderInstructions<
-              DependencyInfo<decltype(BB1Vec)>>(SA, BB1Vec, BB2Vec);
+          AlignedBlocks = SA.getAlignment(BB1Vec, BB2Vec);
+
+          AlignedBlocks = MixedOperationsSequenceAligner<
+                              DependencyInfo<SmallVectorImpl<Value *>>>{}
+                              .getAlignment(AlignedBlocks, BB1Vec, BB2Vec);
 
         } else if (EnableHyFMNW) {
           SmallVector<Value *, 8> BB1Vec;
@@ -2680,10 +2687,10 @@ FunctionMerger::merge(Function *F1, Function *F2, std::string Name,
           SmallVector<Value *, 8> BB2Vec;
           vectorizeBB(BB2Vec, BB2);
 
-          AlignedBlocks = SA__deprecated.getAlignment(BB1Vec, BB2Vec);
+          AlignedBlocks = SA.getAlignment(BB1Vec, BB2Vec);
 
           if (Verbose) {
-            auto MemReq = SA__deprecated.getMemoryRequirement(BB1Vec, BB2Vec);
+            auto MemReq = SA.getMemoryRequirement(BB1Vec, BB2Vec);
             errs() << "MStats: " << BB1Vec.size() << " , " << BB2Vec.size()
                    << " , " << MemReq << "\n";
 
@@ -2747,7 +2754,7 @@ FunctionMerger::merge(Function *F1, Function *F2, std::string Name,
     TimeLin.stopTimer();
 #endif
 
-    auto MemReq = SA__deprecated.getMemoryRequirement(F1Vec, F2Vec);
+    auto MemReq = SA.getMemoryRequirement(F1Vec, F2Vec);
     auto MemAvailable = getTotalSystemMemory();
     errs() << "MStats: " << F1Vec.size() << " , " << F2Vec.size() << " , "
            << MemReq << "\n";
@@ -2820,7 +2827,7 @@ FunctionMerger::merge(Function *F1, Function *F2, std::string Name,
   if (ReportStats)
     return ErrorResponse;
 
-    // errs() << "Code Gen\n";
+  errs() << "Code Gen\n";
 #ifdef ENABLE_DEBUG_CODE
   if (Verbose) {
     for (auto &Entry : AlignedSeq) {

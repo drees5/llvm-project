@@ -409,17 +409,5 @@ public:
   PreservedAnalyses run(Module &M, ModuleAnalysisManager &AM);
 };
 
-namespace impl {
-
-template <typename INSTRUCTION_DEPENDENCY_CALCULATOR, typename SEQUENCE_ALIGNER>
-AlignedCode makeMergedFunctionAndReorderInstructions(
-    SEQUENCE_ALIGNER &SequenceAligner,
-    typename INSTRUCTION_DEPENDENCY_CALCULATOR::value_type &BB1,
-    typename INSTRUCTION_DEPENDENCY_CALCULATOR::value_type &BB2) {
-
-  return SequenceAligner.getAlignment(BB1, BB2);
-}
-
-} // namespace impl
 } // namespace llvm
 #endif

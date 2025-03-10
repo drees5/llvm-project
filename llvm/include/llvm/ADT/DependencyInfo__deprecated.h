@@ -6,7 +6,7 @@
 
 #define ENABLE_DEBUG
 
-enum class Relation {
+enum Relation {
   NONE,
   ANCESTOR,
   DESCENTANT,
@@ -23,68 +23,34 @@ public:
   using value_type = ContainerType;
 
   DependencyInfo(const ContainerType &Seq) : Size{Seq.size()} {
+    // Instruction pointer to index in the Dep arrays mapping
+    llvm::SmallDenseMap<llvm::Instruction *, size_t> IMap;
 
 #ifdef ENABLE_DEBUG
     llvm::errs() << "Sequence Size: " << Size << "\n";
 #endif
 
-    // Instruction pointer to index in the Dep arrays mapping
-    const llvm::SmallDenseMap<llvm::Instruction *, size_t> IMap = [&Seq,
-                                                                   this]() {
-      // We form triangular 2D arrays where row > column
-      // Columns represent producing instructions,
-      // Rows represent consuming instructions
-      // A set bit represents a dependency between the two instructions
-      llvm::SmallDenseMap<llvm::Instruction *, size_t> IMap;
-      for (size_t Idx = 0; Idx < Size; ++Idx) {
-        // emplace back an Idx-sized bit vector
-        Dep.emplace_back(Idx);
-        // Same
-        DataDep.emplace_back(Idx);
+    // We form triangular 2D arrays where row > column
+    // Columns represent producing instructions,
+    // Rows represent consuming instructions
+    // A set bit represents a dependency between the two instructions
+    for (size_t Idx = 0; Idx < Size; ++Idx) {
+      // emplace back an Idx-sized bit vector
+      Dep.emplace_back(Idx);
+      // Same
+      DataDep.emplace_back(Idx);
 
-        // Maintain a mapping from instruction pointer to index
-        if (llvm::Instruction *I = llvm::dyn_cast<llvm::Instruction>(Seq[Idx]);
-            I) {
-          IMap[I] = Idx;
-        }
-      }
-      return IMap;
-    }();
+      // Maintain a mapping from instruction pointer to index
+      llvm::Instruction *I = llvm::dyn_cast<llvm::Instruction>(Seq[Idx]);
+      if (I == nullptr)
+        continue;
+      IMap[I] = Idx;
+    }
 
-    const auto InstructionReadsOrWrites = [](llvm::Instruction *I) -> bool {
-      if (!I)
-        return false;
-      return I->mayReadFromMemory() || I->mayWriteToMemory();
-    };
-
-    const auto InstructionMayLeaveBasicBlock =
-        [](llvm::Instruction *I) -> bool {
-      return I->mayThrow() || !I->willReturn() || llvm::isa<llvm::CallBase>(I);
-    };
-
-    const auto AddInstructionDependencies =
-        [&IMap, this](const llvm::Instruction *I, const llvm::Instruction *UI,
-                      size_t ProducingIdx) {
-          // Find index of this instruction
-          if (const auto It = IMap.find(UI); It != IMap.end()) {
-            const size_t UsingJdx = It->second;
-
-            // skip if it turns out the user it's a self-use
-            if (ProducingIdx == UsingJdx)
-              return;
-
-            // The producer should be before the user
-            assert(ProducingIdx < UsingJdx);
-            // UsingJdx depends on ProducingIdx
-            Dep[UsingJdx].set(ProducingIdx);
-            DataDep[UsingJdx].set(ProducingIdx);
-          }
-        };
-
-    // Optimisation: count serializing instructions and basically bail
-    // out if we have too many of them Rationale: we will have few
-    // opportunities for moving instructions anyway, while the cost of
-    // checking the dependency info will be higher
+    // Optimisation: count serializing instructions and basically bail out if we
+    // have too many of them Rationale: we will have few opportunities for
+    // moving instructions anyway, while the cost of checking the dependency
+    // info will be higher
     size_t SerializingCount = 0;
 
     // Iterate over all instructions in the basic block
@@ -94,6 +60,7 @@ public:
       if (I == nullptr)
         continue;
 
+      // Add all dependencies between this Instruction and its users
       for (const llvm::User *U : I->users()) {
         const llvm::Instruction *UI = llvm::dyn_cast<llvm::Instruction>(U);
 
@@ -101,19 +68,40 @@ public:
         if (!UI || UI->getParent() != I->getParent())
           continue;
 
-        AddInstructionDependencies(I, UI, ProducingIdx);
+        // Find index of this instruction. skip if it turns out the user it's a
+        // self-use
+        auto It = IMap.find(UI);
+        if (It == IMap.end())
+          continue;
+        size_t UsingJdx = It->second;
+        if (ProducingIdx == UsingJdx)
+          continue;
+
+        // The producer should be before the user
+        assert(ProducingIdx < UsingJdx);
+        // UsingJdx depends on ProducingIdx
+        Dep[UsingJdx].set(ProducingIdx);
+        DataDep[UsingJdx].set(ProducingIdx);
       }
 
-      if (InstructionMayLeaveBasicBlock) {
-        // Add dependencies between this and all other instructions,
+      // Add dependencies between this and all other instructions,
+      // if control might leave this basic block
+      if (I->mayThrow() || !I->willReturn() || llvm::isa<llvm::CallBase>(I)) {
         setAll(ProducingIdx);
         SerializingCount++;
         continue;
       }
 
+      // Add dependencies between this and all other memory instructions,
+      // if this instruction modifies memory
       if (I->mayWriteToMemory()) {
-        // Add dependencies between this and all other memory instructions,
-        setAllIf(Seq, ProducingIdx, InstructionReadsOrWrites);
+        setAllIf(Seq, ProducingIdx, [](llvm::Instruction *ID) {
+          if (!ID)
+            return false;
+          if (ID->mayReadFromMemory() || ID->mayWriteToMemory())
+            return true;
+          return false;
+        });
       }
     }
 
@@ -125,12 +113,9 @@ public:
     // TODO: There are more elegant ways of fixing this, e.g. treating each
     // block between two serializing instructions as a separate block for
     // alignment purposes, but this would require some rewriting
-    bool TooManySerializingInstructions =
-        (((Size > 64) && (SerializingCount > Size / 3)) ||
-         ((Size > 512) && (SerializingCount > Size / 4)) ||
-         ((Size > 1024) && (SerializingCount > 256)));
-
-    if (TooManySerializingInstructions) {
+    if (((Size > 64) && (SerializingCount > Size / 3)) ||
+        ((Size > 512) && (SerializingCount > Size / 4)) ||
+        ((Size > 1024) && (SerializingCount > 256))) {
       for (size_t Idx = 1; Idx < Size; ++Idx) {
         Dep[Idx].set();
         Dep[Idx].reset(0);
@@ -143,18 +128,18 @@ public:
     for (size_t Idx = 1; Idx < Size; ++Idx)
       Dep[Idx].reset(0);
 
-    const size_t TerminatorIndex = Size - 1;
-
     // Connect all ancestors and descentants
-    for (size_t Idx = 2; Idx < TerminatorIndex; ++Idx)
-      for (const size_t Jdx : Dep[Idx].set_bits())
+    for (size_t Idx = 2; Idx < Size - 1; ++Idx)
+      for (size_t Jdx : Dep[Idx].set_bits())
         for (size_t Kdx = Idx + 1; Kdx < Size; ++Kdx)
           if (Dep[Kdx][Idx])
             Dep[Kdx].set(Jdx);
 
+    // Row Size - 1 represents the terminator
     // All instructions have a control flow dependency on the terminator
-    Dep[TerminatorIndex].set();
-    Dep[TerminatorIndex].reset(0);
+    //
+    Dep[Size - 1].set();
+    Dep[Size - 1].reset(0);
   }
 
   void setAllIf(const ContainerType &Seq, size_t Idx,
@@ -261,7 +246,7 @@ public:
   }
 
   // Get all the data dependencies (forward and backward) of Idx
-  llvm::SmallBitVector getConnections(size_t Idx) const {
+  llvm::SmallBitVector getConnections(size_t Idx) {
     llvm::SmallBitVector Conns(Size);
     for (size_t OtherIdx = 0; OtherIdx < Idx; ++OtherIdx) {
       Conns[OtherIdx] = DataDep[Idx][OtherIdx];
@@ -272,7 +257,6 @@ public:
     return Conns;
   }
 
-  // Returns the closest instruction that Idx depends on if any
   std::optional<size_t> getDependent(size_t Idx) const {
     if (Idx == 0) {
       return std::nullopt;
@@ -285,12 +269,12 @@ public:
     return std::nullopt;
   }
 
-  Relation getRelation(size_t Idx, size_t Jdx) const {
+  Relation getRelation(size_t Idx, size_t Jdx) {
     if (Idx < Jdx && Dep[Jdx][Idx])
-      return Relation::ANCESTOR;
+      return ANCESTOR;
     if (Idx > Jdx && Dep[Idx][Jdx])
-      return Relation::DESCENTANT;
-    return Relation::NONE;
+      return DESCENTANT;
+    return NONE;
   }
 
   void printStateRow(const size_t Idx) {

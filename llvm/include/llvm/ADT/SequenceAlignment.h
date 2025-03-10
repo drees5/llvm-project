@@ -14,11 +14,14 @@
 #ifndef LLVM_ADT_SEQUENCE_ALIGNMENT_H
 #define LLVM_ADT_SEQUENCE_ALIGNMENT_H
 
+#include "llvm/IR/Value.h"
+#include "llvm/Support/raw_ostream.h"
 #include <cassert>
 
 #include <functional>
 #include <limits> // INT_MIN
 #include <list>
+#include <string>
 
 #define ScoreSystemType int
 
@@ -62,6 +65,50 @@ public:
         return Pair.first;
       else
         return Pair.second;
+    }
+
+    void dump() const {
+      if (this->match()) {
+        errs() << "1: ";
+        if (isa<BasicBlock>(this->get(0)))
+          errs() << "BB " << getValueName(this->get(0)) << "\n";
+        else
+          this->get(0)->dump();
+        errs() << "2: ";
+        if (isa<BasicBlock>(this->get(1)))
+          errs() << "BB " << getValueName(this->get(1)) << "\n";
+        else
+          this->get(1)->dump();
+        errs() << "----\n";
+      } else {
+        if (this->get(0)) {
+          errs() << "1: ";
+          if (isa<BasicBlock>(this->get(0)))
+            errs() << "BB " << getValueName(this->get(0)) << "\n";
+          else
+            this->get(0)->dump();
+          errs() << "2: -\n";
+        } else if (this->get(1)) {
+          errs() << "1: -\n";
+          errs() << "2: ";
+          if (isa<BasicBlock>(this->get(1)))
+            errs() << "BB " << getValueName(this->get(1)) << "\n";
+          else
+            this->get(1)->dump();
+        }
+        errs() << "----\n";
+      }
+    }
+
+  private:
+    static std::string getValueName(const llvm::Value *V) {
+      if (V) {
+        std::string Name;
+        llvm::raw_string_ostream Namestream(Name);
+        V->printAsOperand(Namestream, false);
+        return Namestream.str();
+      }
+      return "[null]";
     }
   };
 
