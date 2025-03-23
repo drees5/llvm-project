@@ -72,7 +72,9 @@ private:
 
     // This means we finished with a merged block
     if (CurrentlyInMergedBlock) {
-      PairIndexes.push_back({CurrentMergedBlockIndex, I});
+      // We don't include the final element as it's always matching, and always
+      // a branch instruction which cannot be moved
+      PairIndexes.push_back({CurrentMergedBlockIndex, I - 1});
     }
 
     return PairIndexes;
@@ -133,14 +135,9 @@ private:
         return Indexes;
       }
 
-      // We need to increment all indexes after the new one as we've inserted a
-      // new instruction. The ones following the move can stay the same
-      for (auto I = NewIndex; I < OldIndex; I++) {
-        if (Indexes.OriginalToNewIndexes[I]) {
-          Indexes.OriginalToNewIndexes[I]++;
-        }
-      }
-
+      // instructions between new-old to the right. Works under the assumption
+      // This places our old instrucion at the new position, and shifts all
+      // that NewIndex < OldIndex
       auto It = std::begin(Indexes.ToOriginalIndexes);
       std::advance(It, OldIndex + 1);
       auto ReverseIt = std::make_reverse_iterator(It);
@@ -149,12 +146,18 @@ private:
       std::advance(NewIt, NewIndex);
       auto ReverseNewIt = std::make_reverse_iterator(NewIt);
 
-      // instructions between new-old to the right. Works under the assumption
-      // This places our old instrucion at the new position, and shifts all
-      // that NewIndex < OldIndex
       std::rotate(ReverseIt, ReverseIt + 1, ReverseNewIt);
 
-      Indexes.OriginalToNewIndexes[*OriginalIndex] = NewIndex;
+      // Now, instead of trying to increment affected indices,
+      // we recalc OriginalToNewIndexes completely.
+      // For every merged position, if there is a corresponding original index,
+      // update the mapping.
+      for (size_t MergedIdx = NewIndex; MergedIdx <= OldIndex; MergedIdx++) {
+        if (auto Orig = Indexes.ToOriginalIndexes[MergedIdx];
+            Orig.has_value()) {
+          Indexes.OriginalToNewIndexes[*Orig] = MergedIdx;
+        }
+      }
 
       return Indexes;
     };
@@ -175,21 +178,21 @@ private:
     const auto &IsValidMove = [&PreMergeIndexes, &BB1InstructionDependenies,
                                &BB2InstructionDependenies,
                                &PreviousBlock](int TargetIndex) {
-      const auto OriginaIndex1 =
+      const auto OriginalIndex1 =
           PreMergeIndexes.first.ToOriginalIndexes[TargetIndex];
-      const auto OriginaIndex2 =
+      const auto OriginalIndex2 =
           PreMergeIndexes.second.ToOriginalIndexes[TargetIndex];
 
       // We can only move InstructionPairs from matched blocks
-      if (!(OriginaIndex1 && OriginaIndex2)) {
+      if (!(OriginalIndex1 && OriginalIndex2)) {
         return false;
       }
 
       const auto Instruction1ClosestDependency =
-          BB1InstructionDependenies.getDependent(*OriginaIndex1);
+          BB1InstructionDependenies.getDependent(*OriginalIndex1);
 
       const auto Instruction2ClosestDependency =
-          BB2InstructionDependenies.getDependent(*OriginaIndex2);
+          BB2InstructionDependenies.getDependent(*OriginalIndex2);
 
       // We don't mind about producers of data for minimising cross-block
       // instruction data flow, we only need to move consumers.
@@ -251,6 +254,11 @@ private:
       INSTRUCTION_DEPENDENCY_CALCULATOR BB1InstructionDependenies,
       INSTRUCTION_DEPENDENCY_CALCULATOR BB2InstructionDependenies) {
     auto MergedBlockIndexes = findSuccessfullyMergedBlocks(InstructionPairs);
+
+    // Early exit out if there's no merged instructions
+    if (MergedBlockIndexes.empty()) {
+      return false;
+    }
 
     auto MergeIndexes = calculatePreMergeIndexes(InstructionPairs);
 
