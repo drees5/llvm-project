@@ -24,7 +24,7 @@ struct MergedBlock {
 enum class Sequence { Type1, Type2 };
 
 template <Sequence T> struct PreMergeIndexes {
-  std::vector<std::optional<int>> ToOriginalIndexes;
+  std::vector<std::pair<std::optional<int>, bool>> ToOriginalIndexes;
   std::vector<int> OriginalToNewIndexes;
 };
 
@@ -93,8 +93,8 @@ private:
     for (const auto &Entry : InstructionPairs) {
       if (Entry.empty()) {
       } else if (!Entry.hasBlank()) {
-        Sequence1.ToOriginalIndexes.push_back(Seq1Index);
-        Sequence2.ToOriginalIndexes.push_back(Seq2Index);
+        Sequence1.ToOriginalIndexes.push_back({Seq1Index, false});
+        Sequence2.ToOriginalIndexes.push_back({Seq2Index, false});
 
         Sequence1.OriginalToNewIndexes.push_back(AlignedSeqIndex);
         Sequence2.OriginalToNewIndexes.push_back(AlignedSeqIndex);
@@ -102,15 +102,15 @@ private:
         Seq1Index++;
         Seq2Index++;
       } else if (Entry.get(0) != Blank) {
-        Sequence1.ToOriginalIndexes.push_back(Seq1Index);
-        Sequence2.ToOriginalIndexes.push_back(std::nullopt);
+        Sequence1.ToOriginalIndexes.push_back({Seq1Index, false});
+        Sequence2.ToOriginalIndexes.push_back({std::nullopt, false});
 
         Sequence1.OriginalToNewIndexes.push_back(AlignedSeqIndex);
 
         Seq1Index++;
       } else {
-        Sequence2.ToOriginalIndexes.push_back(Seq2Index);
-        Sequence1.ToOriginalIndexes.push_back(std::nullopt);
+        Sequence2.ToOriginalIndexes.push_back({Seq2Index, false});
+        Sequence1.ToOriginalIndexes.push_back({std::nullopt, false});
 
         Sequence2.OriginalToNewIndexes.push_back(AlignedSeqIndex);
 
@@ -128,12 +128,14 @@ private:
     auto [Seq1Indexes, Seq2Indexes] = std::move(OldIndexes);
 
     const auto &UpdateIndexes = [OldIndex, NewIndex](auto Indexes) {
-      auto OriginalIndex = Indexes.ToOriginalIndexes[OldIndex];
+      auto &[OriginalIndex, isMoved1] = Indexes.ToOriginalIndexes[OldIndex];
 
       // Shouldn't happen
       if (!OriginalIndex) {
         return Indexes;
       }
+
+      isMoved1 = true;
 
       // instructions between new-old to the right. Works under the assumption
       // This places our old instrucion at the new position, and shifts all
@@ -152,8 +154,9 @@ private:
       // we recalc OriginalToNewIndexes completely.
       // For every merged position, if there is a corresponding original index,
       // update the mapping.
+
       for (size_t MergedIdx = NewIndex; MergedIdx <= OldIndex; MergedIdx++) {
-        if (auto Orig = Indexes.ToOriginalIndexes[MergedIdx];
+        if (auto [Orig, _] = Indexes.ToOriginalIndexes[MergedIdx];
             Orig.has_value()) {
           Indexes.OriginalToNewIndexes[*Orig] = MergedIdx;
         }
@@ -179,38 +182,66 @@ private:
                                &BB2InstructionDependenies,
                                &PreviousBlock](int TargetIndex) {
       const auto OriginalIndex1 =
-          PreMergeIndexes.first.ToOriginalIndexes[TargetIndex];
+          PreMergeIndexes.first.ToOriginalIndexes[TargetIndex].first;
       const auto OriginalIndex2 =
-          PreMergeIndexes.second.ToOriginalIndexes[TargetIndex];
-
+          PreMergeIndexes.second.ToOriginalIndexes[TargetIndex].first;
       // We can only move InstructionPairs from matched blocks
       if (!(OriginalIndex1 && OriginalIndex2)) {
         return false;
       }
 
-      const auto Instruction1ClosestDependency =
-          BB1InstructionDependenies.getDependent(*OriginalIndex1);
+      bool IsMovedIndex1 = false, IsMovedIndex2 = false;
+      std::pair<size_t, size_t> LastDependency1 = {*OriginalIndex1,
+                                                   TargetIndex},
+                                LastDependency2 = {*OriginalIndex2,
+                                                   TargetIndex};
 
-      const auto Instruction2ClosestDependency =
-          BB2InstructionDependenies.getDependent(*OriginalIndex2);
+      // Find last instruction we depend on that ISNT a moved one.
+      do {
+        const auto Instruction1ClosestDependency =
+            BB1InstructionDependenies.getDependent(*OriginalIndex1,
+                                                   LastDependency1.first);
 
-      // We don't mind about producers of data for minimising cross-block
-      // instruction data flow, we only need to move consumers.
-      if (!Instruction1ClosestDependency || !Instruction2ClosestDependency) {
-        return false;
-      }
+        const auto Instruction2ClosestDependency =
+            BB2InstructionDependenies.getDependent(*OriginalIndex2,
+                                                   LastDependency2.first);
 
-      const size_t NewDependencyIndex1 =
-          PreMergeIndexes.first
-              .OriginalToNewIndexes[*Instruction1ClosestDependency];
-      const size_t NewDependencyIndex2 =
-          PreMergeIndexes.second
-              .OriginalToNewIndexes[*Instruction2ClosestDependency];
+        if (Instruction1ClosestDependency) {
+          auto NewDependencyIndex1 =
+              PreMergeIndexes.first
+                  .OriginalToNewIndexes[*Instruction1ClosestDependency];
+          IsMovedIndex1 =
+              PreMergeIndexes.first.ToOriginalIndexes[NewDependencyIndex1]
+                  .second;
+
+          LastDependency1 = {*Instruction1ClosestDependency,
+                             NewDependencyIndex1};
+        }
+        if (Instruction2ClosestDependency) {
+          auto NewDependencyIndex2 =
+              PreMergeIndexes.second
+                  .OriginalToNewIndexes[*Instruction2ClosestDependency];
+          IsMovedIndex2 =
+              PreMergeIndexes.first.ToOriginalIndexes[NewDependencyIndex2]
+                  .second;
+
+          LastDependency2 = {*Instruction2ClosestDependency,
+                             NewDependencyIndex2};
+        }
+
+        // May as well move if we don't have any dependencies
+        // Can also happen if we only depend on moved instructions
+        if (!Instruction1ClosestDependency && !Instruction2ClosestDependency) {
+          llvm::errs() << "Instruction has no dependencies.\n";
+          break;
+        }
+
+      } while (IsMovedIndex1 || IsMovedIndex2);
 
       // We can move our merged instruciton iff we don't depend on anything
       // after our previous merged block.
-      return NewDependencyIndex1 < PreviousBlock.EndIndex &&
-             NewDependencyIndex2 < PreviousBlock.EndIndex;
+      return LastDependency1.second < PreviousBlock.EndIndex &&
+             LastDependency2.second < PreviousBlock.EndIndex;
     };
 
     // We don't care where in the previous basic block we've moved to, only that

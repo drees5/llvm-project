@@ -273,12 +273,15 @@ public:
   }
 
   // Returns the closest instruction that Idx depends on if any
-  std::optional<size_t> getDependent(size_t Idx) const {
+  std::optional<size_t>
+  getDependent(size_t Idx, std::optional<size_t> FromIdx = std::nullopt) const {
     if (Idx == 0) {
       return std::nullopt;
     }
 
-    if (const int Dependent = Dep[Idx].find_last(); Dependent != -1) {
+    if (const int Dependent =
+            FromIdx ? Dep[Idx].find_prev(*FromIdx) : Dep[Idx].find_last();
+        Dependent != -1) {
       return Dependent;
     }
 
