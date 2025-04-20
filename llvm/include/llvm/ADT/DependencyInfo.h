@@ -104,7 +104,7 @@ public:
         AddInstructionDependencies(I, UI, ProducingIdx);
       }
 
-      if (InstructionMayLeaveBasicBlock) {
+      if (InstructionMayLeaveBasicBlock(I)) {
         // Add dependencies between this and all other instructions,
         setAll(ProducingIdx);
         SerializingCount++;

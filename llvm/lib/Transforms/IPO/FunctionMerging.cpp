@@ -87,7 +87,7 @@
 
 // #include "llvm/ADT/PostOrderIterator.h"
 #include "llvm/ADT/BreadthFirstIterator.h"
-#include "llvm/ADT/DependencyInfo__deprecated.h"
+#include "llvm/ADT/DependencyInfo.h"
 #include "llvm/ADT/MixedOrderOperationsAlignment.h"
 #include "llvm/ADT/PostOrderIterator.h"
 #include "llvm/ADT/SANeedlemanWunsch__deprecated.h"
